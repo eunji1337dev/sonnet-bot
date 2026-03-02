@@ -44,6 +44,15 @@ class Settings(BaseSettings):
             return []
         return [int(x.strip()) for x in self.admin_ids.split(",") if x.strip()]
 
+    # ── Доверенные пользователи (ЛС бота) ───────────────
+    allowed_private_users: str = "derontavicious,widzzzo"
+
+    @property
+    def allowed_private_user_list(self) -> List[str]:
+        if not self.allowed_private_users:
+            return []
+        return [x.strip().lower() for x in self.allowed_private_users.split(",") if x.strip()]
+
     # ── AI ──────────────────────────────────────────────
     ai_provider: str = "groq"  # "groq" или "gemini"
     ai_model: str = "llama-3.1-8b-instant"
