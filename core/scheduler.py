@@ -233,20 +233,13 @@ async def _check_upcoming_classes(bot: Bot, now: datetime) -> None:
         target_time = now + timedelta(minutes=15)
         target_time_str = target_time.strftime("%H:%M")
 
-        # We only want to trigger exactly once per class, so check if now + 15m matches class start_time
         for cls in classes:
-            # cls: (id, day_of_week, start_time, end_time, subject_id, class_type, room, teacher_name)
-            start_time = cls["start_time"]
-
-            # db.get_schedule_for_day returns:
-            # SELECT sched.id, sched.day_of_week, sched.start_time, sched.end_time,
-            # subj.name, sched.class_type, sched.room, subj.teacher_name
-            # So cls[4] is subj.name, cls[5] is class_type, cls[6] is room
+            start_time = cls["time_start"]
 
             if start_time == target_time_str:
-                subj_name = cls["name"]
-                class_type = cls["class_type"]
-                room = cls["room"]
+                subj_name = cls["subject"]
+                class_type = cls["group_type"]
+                room = cls.get("room", "—")
 
                 text = (
                     f"⚠️ <b>Напоминание!</b>\n"
