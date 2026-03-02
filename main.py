@@ -6,14 +6,12 @@ Sonnet — AI-ассистент группы Europske studia.
 from __future__ import annotations
 
 import os
+import os
 import asyncio
 import logging
 import sys
-from typing import Any
 
 from aiohttp import web
-
-import signal
 import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -80,18 +78,6 @@ _scheduler_task = None
 _engine: GeminiEngine | None = None
 
 
-async def start_dummy_server() -> None:
-    """Заглушка для Render.com (Web Service), чтобы порт прослушивался."""
-    app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="Sonnet Bot is alive!"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    structlog.get_logger(__name__).info(f"Dummy HTTP server started on port {port}")
-
-
 async def on_startup(bot: Bot) -> None:
     log = structlog.get_logger(__name__)
 
@@ -148,21 +134,6 @@ def _setup_otel() -> None:
     AsyncioInstrumentor().instrument()
 
 
-async def shutdown(
-    loop: asyncio.AbstractEventLoop, sig: signal.Signals | None = None
-) -> None:
-    """Graceful shutdown: отмена задач и выход."""
-    if sig:
-        structlog.get_logger(__name__).info(f"Получен сигнал: {sig.name}")
-
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    [task.cancel() for task in tasks]
-
-    structlog.get_logger(__name__).info(f"Отмена {len(tasks)} задач...")
-    await asyncio.gather(*tasks, return_exceptions=True)
-    loop.stop()
-
-
 async def on_shutdown(bot: Bot) -> None:
     log = structlog.get_logger(__name__)
 
@@ -180,7 +151,7 @@ async def on_shutdown(bot: Bot) -> None:
 # ═══════════════════════════════════════════════════════
 
 
-def main() -> None:
+async def async_main() -> None:
     _setup_logging()
 
     bot = Bot(
@@ -213,26 +184,47 @@ def main() -> None:
 
     _setup_otel()
 
-    loop = asyncio.get_event_loop()
+    # 1. Запускаем минимальный HTTP-сервер для healthcheck (Render Web Service)
+    app = web.Application()
+    
+    async def health_handler(request: web.Request) -> web.Response:
+        return web.Response(text="OK", status=200)
+    
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    
+    # site.start() запускает фоновую задачу прослушивания порта,
+    # что работает конкурентно с циклом поллинга aiogram.
+    await site.start()
+    structlog.get_logger(__name__).info(f"Health server listening on port {port}")
 
-    # Регистрация сигналов
-    def signal_handler(sig_received: Any) -> None:
-        asyncio.create_task(shutdown(loop, sig_received))
-
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        loop.add_signal_handler(sig, signal_handler, sig)
+    # 2. Оборачиваем поллинг в задачу (Render-безопасно)
+    polling_task = asyncio.create_task(
+        dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query", "chat_member"],
+        )
+    )
 
     try:
-        loop.create_task(
-            dp.start_polling(
-                bot,
-                allowed_updates=["message", "callback_query", "chat_member"],
-            )
-        )
-        loop.create_task(start_dummy_server())
-        loop.run_forever()
+        # aiogram сам перехватит сигналы остановки (SIGTERM/SIGINT) и корректно завершится
+        await polling_task
+    except asyncio.CancelledError:
+        structlog.get_logger(__name__).info("Polling task was cancelled.")
     finally:
-        loop.close()
+        await runner.cleanup()
+
+
+def main() -> None:
+    try:
+        asyncio.run(async_main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":

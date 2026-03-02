@@ -23,3 +23,4 @@ opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-asyncio
 opentelemetry-exporter-otlp
+groq>=0.4
