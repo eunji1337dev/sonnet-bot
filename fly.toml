@@ -1,0 +1,19 @@
+app = "sonnet-bot"
+primary_region = "fra" # Франкфурт (ближе к Словакии/Украине)
+
+# Важно: это фоновый процесс, поэтому у нас нет HTTP-сервисов
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  TZ = "Europe/Bratislava"
+  # Остальные переменные лучше сетить через `fly secrets set`
+
+# Монтируем Volume для SQLite
+[mounts]
+  source = "sonnet_data"
+  destination = "/app/data"
+
+[processes]
+  app = "python main.py"

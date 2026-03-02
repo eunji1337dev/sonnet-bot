@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  sonnet-bot:
+    build: .
+    container_name: sonnet-bot
+    restart: always
+    environment:
+      - DATABASE_PATH=/app/data/sonnet.db
+      - OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
+    volumes:
+      - ./data:/app/data
+    secrets:
+      - bot_token
+      - groq_api_key
+      - gemini_api_key
+
+secrets:
+  bot_token:
+    file: ./secrets/bot_token.txt
+  groq_api_key:
+    file: ./secrets/groq_api_key.txt
+  gemini_api_key:
+    file: ./secrets/gemini_api_key.txt

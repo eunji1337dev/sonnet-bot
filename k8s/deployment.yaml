@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonnet-bot
+  namespace: default
+  labels:
+    app: sonnet-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sonnet-bot
+  template:
+    metadata:
+      labels:
+        app: sonnet-bot
+    spec:
+      containers:
+        - name: sonnet-bot
+          image: sonnet-bot:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: sonnet-bot-secrets
+          volumeMounts:
+            - name: data-volume
+              mountPath: /app/data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: sonnet-bot-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonnet-bot-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
