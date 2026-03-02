@@ -5,10 +5,13 @@ Sonnet — AI-ассистент группы Europske studia.
 
 from __future__ import annotations
 
+import os
 import asyncio
 import logging
 import sys
 from typing import Any
+
+from aiohttp import web
 
 import signal
 import structlog
@@ -75,6 +78,18 @@ def _setup_logging() -> None:
 
 _scheduler_task = None
 _engine: GeminiEngine | None = None
+
+
+async def start_dummy_server() -> None:
+    """Заглушка для Render.com (Web Service), чтобы порт прослушивался."""
+    app = web.Application()
+    app.router.add_get("/", lambda r: web.Response(text="Sonnet Bot is alive!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    structlog.get_logger(__name__).info(f"Dummy HTTP server started on port {port}")
 
 
 async def on_startup(bot: Bot) -> None:
@@ -214,6 +229,7 @@ def main() -> None:
                 allowed_updates=["message", "callback_query", "chat_member"],
             )
         )
+        loop.create_task(start_dummy_server())
         loop.run_forever()
     finally:
         loop.close()
