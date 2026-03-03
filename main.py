@@ -27,8 +27,7 @@ from core import database as db
 from core.ai_engine import AIEngine
 from core.scheduler import EnterpriseScheduler
 from handlers import commands, messages, callbacks
-from middleware.auth import AuthMiddleware
-from middleware.logging import LoggingMiddleware
+# No middleware module present anymore
 
 # Initialize Tracer
 trace.set_tracer_provider(TracerProvider())
@@ -51,8 +50,6 @@ scheduler = EnterpriseScheduler(bot)
 def setup_handlers(dispatcher: Dispatcher, ai: AIEngine) -> None:
     dispatcher.include_router(commands.router)
     dispatcher.include_router(callbacks.router)
-    # Inject engine dependencies explicitly to the message handlers
-    messages.router.message.middleware(AuthMiddleware())
     dispatcher.include_router(messages.router)
     
     # Store engine globally in dispatcher for easy access in handlers if needed
@@ -66,7 +63,7 @@ async def lifespan(app: FastAPI):
     await db.init_db()
 
     setup_handlers(dp, ai_engine)
-    dp.update.outer_middleware(LoggingMiddleware())
+
 
     # Start APScheduler
     scheduler.start()
