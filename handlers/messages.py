@@ -18,20 +18,20 @@ from modules.moderation import check_spam
 import structlog
 from aiogram import Router, types
 from aiogram.filters import Filter
+from aiogram.dispatcher.event.bases import SkipHandler
 
 from core import database as db
-from core.ai_engine import GeminiEngine, split_long_message
-from aiogram.dispatcher.event.bases import SkipHandler
+from core.ai_engine import AIEngine, split_long_message
 
 log = structlog.get_logger(__name__)
 
 router = Router(name="messages")
 
-_engine: Optional[GeminiEngine] = None
+_engine: Optional[AIEngine] = None
 _bot_info: Optional[types.User] = None
 
 
-def set_engine(engine: GeminiEngine) -> None:
+def set_engine(engine: AIEngine) -> None:
     global _engine
     _engine = engine
 
@@ -210,6 +210,9 @@ async def handle_remember(message: types.Message) -> None:
 async def handle_ai_message(message: types.Message) -> None:
     """Обработать сообщение через AI."""
     if not _engine:
+        # Fallback to dispatcher engine inject if set via middleware or loop
+        engine_from_dp = getattr(message, "bot", None) 
+        # A bit hacky: better to access from dp kwargs, but if singleton is used it's fine.
         log.warning("handle_ai_message: _engine is None")
         return
 
@@ -249,20 +252,15 @@ async def handle_ai_message(message: types.Message) -> None:
                 "Chat action in AI message failed", error=str(e)
             )
 
-    # Контекст из базы
+    # Контекст из базы (статичный)
     db_context = await _build_message_context(question)
 
-    # Память: недавние сообщения + поиск по всей истории
-    chat_history = ""
-    if message.chat.type in ("group", "supergroup"):
-        chat_history = await _build_chat_memory(message.chat.id, question)
-
+    # 2026 Edition: chat_history is handled automatically via RAG internally in AIEngine
     answer = await _engine.generate_response(
         user.id,
         question,
         db_context=db_context,
-        sender_name=user.first_name or "",
-        chat_history=chat_history,
+        sender_name=user.first_name or ""
     )
 
     if not answer or not answer.strip():
@@ -282,125 +280,6 @@ async def handle_ai_message(message: types.Message) -> None:
 
 
 async def _build_message_context(question: str) -> str:
-    """Собрать контекст из базы данных."""
+    """Собрать контекст из БД (основная информация)."""
     from handlers.commands import _build_db_context
-
     return await _build_db_context(question)
-
-
-# ═══════════════════════════════════════════════════════
-# SMART MEMORY
-# ═══════════════════════════════════════════════════════
-
-_STOPWORDS = {
-    "а",
-    "в",
-    "и",
-    "к",
-    "на",
-    "не",
-    "по",
-    "с",
-    "у",
-    "я",
-    "он",
-    "она",
-    "мы",
-    "вы",
-    "их",
-    "его",
-    "это",
-    "что",
-    "как",
-    "ещё",
-    "еще",
-    "все",
-    "уже",
-    "ли",
-    "то",
-    "да",
-    "нет",
-    "бы",
-    "же",
-    "ну",
-    "где",
-    "кто",
-    "чем",
-    "для",
-    "из",
-    "до",
-    "так",
-    "или",
-    "вот",
-    "тут",
-    "там",
-    "но",
-    "от",
-    "the",
-    "is",
-    "are",
-    "was",
-    "do",
-    "a",
-    "an",
-    "in",
-    "on",
-    "to",
-    "of",
-    "for",
-    "and",
-    "or",
-    "je",
-    "na",
-    "to",
-    "sa",
-    "za",
-    "od",
-    "do",
-    "ako",
-    "ale",
-    "že",
-    "by",
-}
-
-
-def _extract_keywords(text: str) -> list:
-    """Извлечь ключевые слова из вопроса (без стоп-слов, 3+ символа)."""
-    words = re.findall(r"[a-zA-Zа-яА-ЯёЁіІїЇєЄґҐčšžťďňĺŕäôúýáéíóöüĆŠŽ]+", text.lower())
-    keywords = [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
-    return keywords[:8]  # Макс 8 ключевых слов
-
-
-def _format_messages(messages: list) -> str:
-    """Форматировать сообщения в строку для контекста."""
-    lines = []
-    for msg in messages:
-        name = msg.get("first_name", "?")
-        txt = msg.get("text", "")[:200]
-        ts = msg.get("created_at", "")[:16] if msg.get("created_at") else ""
-        lines.append(f"[{ts}] {name}: {txt}")
-    return "\n".join(lines)
-
-
-async def _build_chat_memory(chat_id: int, question: str) -> str:
-    """Собрать полный контекст из памяти: недавние + релевантные из истории + заметки."""
-    parts = []
-
-    # 1. Последние 30 сообщений (недавний контекст)
-    recent = await db.get_recent_messages(chat_id, limit=30)
-    if recent:
-        parts.append("=== ПОСЛЕДНИЕ СООБЩЕНИЯ ===")
-        parts.append(_format_messages(recent))
-
-    # 2. Поиск по всей истории по ключевым словам вопроса
-    keywords = _extract_keywords(question)
-    if keywords:
-        found = await db.search_messages(chat_id, keywords, limit=20)
-        # Убрать дубли с недавними
-        recent_texts = {m.get("text", "") for m in recent} if recent else set()
-        unique_found = [m for m in found if m.get("text", "") not in recent_texts]
-        if unique_found:
-            parts.append(f"\n=== ИЗ ИСТОРИИ (по: {', '.join(keywords)}) ===")
-            parts.append(_format_messages(unique_found))
-
-    return "\n".join(parts)

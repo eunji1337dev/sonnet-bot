@@ -1,69 +1,64 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
-from core.ai_engine import GeminiEngine
-
-
-@pytest.fixture
-def mock_groq():
-    """Mock Groq client."""
-    with patch("groq.Groq") as MockGroq:
-        mock_client = MockGroq.return_value
-        yield mock_client
-
+from core.ai_engine import AIEngine
 
 @pytest.fixture
-def mock_gemini():
-    """Mock Gemini client."""
-    with patch("google.genai.Client") as mock_gemini_client:
-        yield mock_gemini_client
+def mock_dependencies():
+    with patch("core.ai_engine.MemoryManager") as mock_memory, \
+         patch("core.ai_engine.SemanticRouter") as mock_router, \
+         patch("core.ai_engine.ToolRegistry") as mock_tools:
+        
+        mock_router_instance = mock_router.return_value
+        mock_intent = MagicMock()
+        mock_intent.needs_tools = False
+        mock_intent.intent_type = "GENERAL_CHAT"
+        mock_router_instance.classify_intent = AsyncMock(return_value=mock_intent)
+        
+        mock_memory_instance = mock_memory.return_value
+        mock_memory_instance.semantic_search = AsyncMock(return_value="rag context")
+        mock_memory_instance.add_chat_message = AsyncMock()
+        
+        yield {
+            "memory": mock_memory_instance,
+            "router": mock_router_instance,
+            "intent": mock_intent
+        }
 
 
 @pytest.mark.asyncio
-async def test_ai_engine_initializes_with_correct_model(mock_groq, mock_gemini):
-    with patch("config.settings.ai_provider", "groq"):
-        engine = GeminiEngine()
-        assert engine._provider == "groq"
+async def test_ai_generate_response_routing_to_groq(mock_dependencies):
+    with patch("core.ai_engine.AIEngine._init_groq"), \
+         patch("core.ai_engine.AIEngine._init_gemini"):
+             
+        engine = AIEngine()
+        # Mock rate limiters
+        engine._user_limiters.allow = AsyncMock(return_value=True)
+        engine._global_limiters = AsyncMock()
+        engine._global_limiter.allow = AsyncMock(return_value=True)
+        
+        engine._call_groq = AsyncMock(return_value="Groq Answer")
+        
+        response = await engine.generate_response(1, "Hello")
+        
+        assert response == "Groq Answer"
+        engine.router.classify_intent.assert_called_once_with("Hello")
+        engine._call_groq.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_ai_generate_response_uses_groq(mock_groq, mock_gemini):
-    with patch("config.settings.ai_provider", "groq"):
-        engine = GeminiEngine()
-
-        # Configure the mock chain: client.chat.completions.create().choices[0].message.content
-        from unittest.mock import MagicMock
-
-        mock_choice = MagicMock()
-        mock_choice.message.content = "Test Groq Response"
-        mock_groq.chat.completions.create.return_value.choices = [mock_choice]
-
-        # Override _call_groq to not run in a separate thread for testing, or just mock the inner behavior.
-        # It's better to patch the internal asyncio.to_thread if we test threading,
-        # but here the mock is standard synchronous MagicMock, so `to_thread` will resolve it seamlessly.
-        resp = await engine.generate_response(user_id=1, message="Hello")
-        assert resp == "Test Groq Response"
-        mock_groq.chat.completions.create.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_ai_generate_response_retries_on_error(mock_groq, mock_gemini):
-    with patch("config.settings.ai_provider", "groq"):
-        engine = GeminiEngine()
-
-        # Mock failure then success
-        mock_choice = MagicMock()
-        mock_choice.message.content = "Success After Retry"
-
-        # ERROR STRING MUST CONTAIN "429" OR "rate" to trigger retry in ai_engine.py
-        mock_groq.chat.completions.create.side_effect = [
-            Exception("429 Rate limit"),
-            MagicMock(choices=[mock_choice]),
-        ]
-
-        # We need to patch time.sleep or similar if there was a delay,
-        # but GeminiEngine uses exponential backoff.
-        # Let's assume it works or mock the sleep.
-        with patch("asyncio.sleep", AsyncMock()):
-            resp = await engine.generate_response(user_id=1, message="Hello")
-            assert resp == "Success After Retry"
-            assert mock_groq.chat.completions.create.call_count == 2
+async def test_ai_generate_response_routing_to_gemini(mock_dependencies):
+    mock_dependencies["intent"].needs_tools = True
+    
+    with patch("core.ai_engine.AIEngine._init_groq"), \
+         patch("core.ai_engine.AIEngine._init_gemini"):
+             
+        engine = AIEngine()
+        engine._user_limiters.allow = AsyncMock(return_value=True)
+        engine._global_limiter.allow = AsyncMock(return_value=True)
+        
+        engine._call_gemini_with_tools = AsyncMock(return_value="Gemini Answer")
+        
+        response = await engine.generate_response(1, "What is the schedule?")
+        
+        assert response == "Gemini Answer"
+        engine._call_gemini_with_tools.assert_called_once()

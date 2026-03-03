@@ -96,7 +96,7 @@ class PrivateMessageFilterMiddleware(BaseMiddleware):
 
         if chat and chat.type == "private" and user:
             username = (user.username or "").lower()
-            if username not in self.ALLOWED_USERNAMES:
+            if username not in settings.allowed_private_user_list:
                 log.info("private message blocked", user_id=user.id, username=username)
 
                 # Сообщаем пользователю, что доступ закрыт

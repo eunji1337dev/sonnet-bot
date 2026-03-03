@@ -1,231 +1,118 @@
 """
-Sonnet — AI-ассистент группы Europske studia.
-Точка входа: инициализация бота, подключение роутеров, lifecycle.
+Main entry point (2026 Enterprise Edition).
+Integrates: OpenTelemetry, FastAPI (Health/Webhooks), Aiogram Polling, APScheduler, and the AI Engine.
 """
 
 from __future__ import annotations
 
-import os
-import os
 import asyncio
-import logging
+import os
 import sys
+from contextlib import asynccontextmanager
 
-from aiohttp import web
 import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import BotCommand
+from aiogram.enums import ParseMode
+from fastapi import FastAPI
+import uvicorn
 
+# OpenTelemetry configuration
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-from opentelemetry.instrumentation.asyncio import AsyncioInstrumentor
 
 from config import settings
-from core.ai_engine import GeminiEngine
 from core import database as db
-from core.scheduler import scheduler_loop
-from handlers import commands as cmd_handlers
-from handlers import messages as msg_handlers
-from handlers import callbacks as cb_handlers
-from handlers import admin as admin_handlers
-from handlers import media as media_handlers
-from modules.moderation import router as moderation_router
-from handlers.middleware import (
-    LoggingMiddleware,
-    PrivateMessageFilterMiddleware,
-    UserTrackingMiddleware,
-    AntiSpamMiddleware,
+from core.ai_engine import AIEngine
+from core.scheduler import EnterpriseScheduler
+from handlers import commands, messages, callbacks
+from middleware.auth import AuthMiddleware
+from middleware.logging import LoggingMiddleware
+
+# Initialize Tracer
+trace.set_tracer_provider(TracerProvider())
+tracer = trace.get_tracer_provider().get_tracer(__name__)
+trace.get_tracer_provider().add_span_processor(
+    BatchSpanProcessor(ConsoleSpanExporter())
 )
 
+log = structlog.get_logger(__name__)
 
-# ═══════════════════════════════════════════════════════
-# LOGGING
-# ═══════════════════════════════════════════════════════
-
-
-def _setup_logging() -> None:
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty()),
-        ],
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=logging.INFO,
-    )
+bot = Bot(
+    token=settings.bot_token.get_secret_value(),
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+dp = Dispatcher()
+ai_engine = AIEngine()
+scheduler = EnterpriseScheduler(bot)
 
 
-# ═══════════════════════════════════════════════════════
-# LIFECYCLE
-# ═══════════════════════════════════════════════════════
+def setup_handlers(dispatcher: Dispatcher, ai: AIEngine) -> None:
+    dispatcher.include_router(commands.router)
+    dispatcher.include_router(callbacks.router)
+    # Inject engine dependencies explicitly to the message handlers
+    messages.router.message.middleware(AuthMiddleware())
+    dispatcher.include_router(messages.router)
+    
+    # Store engine globally in dispatcher for easy access in handlers if needed
+    dispatcher["ai_engine"] = ai
 
-_scheduler_task = None
-_engine: GeminiEngine | None = None
 
-
-async def on_startup(bot: Bot) -> None:
-    log = structlog.get_logger(__name__)
-
-    # Инициализация БД
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI Lifespan events for startup/shutdown."""
+    log.info("Starting Enterprise Sonnet Bot (FastAPI)")
     await db.init_db()
 
-    # Инициализация AI-движка
-    global _engine
-    _engine = GeminiEngine()
+    setup_handlers(dp, ai_engine)
+    dp.update.outer_middleware(LoggingMiddleware())
 
-    # Передать engine в обработчики
-    cmd_handlers.set_engine(_engine)
-    msg_handlers.set_engine(_engine)
-    media_handlers.set_engine(_engine)
+    # Start APScheduler
+    scheduler.start()
 
-    # Сохранить info бота для фильтра сообщений
-    me = await bot.me()
-    msg_handlers.set_bot_info(me)
+    # Start background polling task
+    log.info("Starting Telegram polling")
+    polling_task = asyncio.create_task(dp.start_polling(bot))
 
-    log.info("Sonnet запущен", bot=me.username, id=me.id)
+    yield
 
-    # Зарегистрировать команды в Telegram
-    commands = [
-        BotCommand(command="start", description="Начало работы"),
-        BotCommand(command="help", description="Справка по командам"),
-        BotCommand(command="schedule", description="Расписание на сегодня"),
-        BotCommand(command="schedule_week", description="Расписание на неделю"),
-        BotCommand(command="next", description="Ближайшая пара"),
-        BotCommand(command="exams", description="Экзамены"),
-        BotCommand(command="deadlines", description="Дедлайны"),
-        BotCommand(command="subjects", description="Список предметов"),
-        BotCommand(command="links", description="Полезные ссылки"),
-        BotCommand(command="faq", description="Частые вопросы"),
-        BotCommand(command="ask", description="Задать вопрос AI"),
-        BotCommand(command="translate", description="Перевод RU/UA/SK"),
-        BotCommand(command="letter", description="Письмо преподавателю"),
-        BotCommand(command="remind", description="Напоминание"),
-        BotCommand(command="weather", description="Погода в Прешове"),
-        BotCommand(command="id", description="Твой Telegram ID"),
-    ]
-    await bot.set_my_commands(commands)
-
-    # Запуск планировщика
-    global _scheduler_task
-    _scheduler_task = asyncio.create_task(scheduler_loop(bot))
-
-
-def _setup_otel() -> None:
-    """Настройка OpenTelemetry."""
-    provider = TracerProvider()
-    processor = BatchSpanProcessor(ConsoleSpanExporter())
-    provider.add_span_processor(processor)
-    trace.set_tracer_provider(provider)
-    AsyncioInstrumentor().instrument()
-
-
-async def on_shutdown(bot: Bot) -> None:
-    log = structlog.get_logger(__name__)
-
-    global _scheduler_task
-    if _scheduler_task and not _scheduler_task.done():
-        _scheduler_task.cancel()
-
-    await db.close_db()
-    log.info("Sonnet остановлен")
-    await bot.session.close()
-
-
-# ═══════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════
-
-
-async def async_main() -> None:
-    _setup_logging()
-
-    bot = Bot(
-        token=settings.bot_token.get_secret_value(),
-        default=DefaultBotProperties(parse_mode="HTML"),
-    )
-
-    dp = Dispatcher()
-
-    # Middleware
-    dp.message.middleware(PrivateMessageFilterMiddleware())
-    dp.message.middleware(AntiSpamMiddleware())
-    dp.message.middleware(LoggingMiddleware())
-    dp.message.middleware(UserTrackingMiddleware())
-
-    dp.callback_query.middleware(PrivateMessageFilterMiddleware())
-    dp.callback_query.middleware(AntiSpamMiddleware())
-    dp.callback_query.middleware(LoggingMiddleware())
-
-    # Порядок важен: команды -> админ -> callbacks -> модерация -> медиа -> сообщения (catch-all)
-    dp.include_router(cmd_handlers.router)
-    dp.include_router(admin_handlers.router)
-    dp.include_router(cb_handlers.router)
-    dp.include_router(moderation_router)
-    dp.include_router(media_handlers.router)
-    dp.include_router(msg_handlers.router)
-
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-
-    _setup_otel()
-
-    # 1. Запускаем минимальный HTTP-сервер для healthcheck (Render Web Service)
-    app = web.Application()
-    
-    async def health_handler(request: web.Request) -> web.Response:
-        return web.Response(text="OK", status=200)
-    
-    app.router.add_get("/", health_handler)
-    app.router.add_get("/health", health_handler)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    
-    # site.start() запускает фоновую задачу прослушивания порта,
-    # что работает конкурентно с циклом поллинга aiogram.
-    await site.start()
-    structlog.get_logger(__name__).info(f"Health server listening on port {port}")
-
-    # 2. Оборачиваем поллинг в задачу (Render-безопасно)
-    polling_task = asyncio.create_task(
-        dp.start_polling(
-            bot,
-            allowed_updates=["message", "callback_query", "chat_member"],
-        )
-    )
-
+    log.info("Shutting down... Stopping services")
+    scheduler.shutdown()
+    polling_task.cancel()
     try:
-        # aiogram сам перехватит сигналы остановки (SIGTERM/SIGINT) и корректно завершится
         await polling_task
     except asyncio.CancelledError:
-        structlog.get_logger(__name__).info("Polling task was cancelled.")
-    finally:
-        await runner.cleanup()
+        pass
+    await bot.session.close()
+    await db.close_db()
+    log.info("Shutdown complete.")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/health")
+async def health_check():
+    """Endpoint for UptimeRobot to ping to prevent Render free-tier sleep."""
+    with tracer.start_as_current_span("health_check"):
+        return {"status": "ok", "version": "2026.1.0"}
 
 
 def main() -> None:
-    try:
-        asyncio.run(async_main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    # Run the bot application using Uvicorn
+    # Render binds the active web process to port set in PORT environment variable
+    port = int(os.environ.get("PORT", 8080))
+    host = "0.0.0.0"
+    
+    log.info("Starting Uvicorn server", host=host, port=port)
+    uvicorn.run("main:app", host=host, port=port, loop="uvloop")
 
 
 if __name__ == "__main__":
-    main()
+    import uvloop
+    uvloop.install()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.info("Application interrupted by user.")

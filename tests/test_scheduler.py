@@ -1,45 +1,54 @@
 import pytest
-import asyncio
-from unittest.mock import patch, MagicMock
-from core.scheduler import scheduler_loop
-
+from unittest.mock import patch, MagicMock, AsyncMock
+from apscheduler.jobstores.memory import MemoryJobStore
+from core.scheduler import EnterpriseScheduler
 
 @pytest.fixture
-def mock_db():
-    with patch("core.database.get_db") as mock_conn:
-        yield mock_conn
+def mock_bot():
+    return MagicMock()
 
-
-@pytest.mark.asyncio
-async def test_scheduler_loop_skips_when_quiet_mode_is_on(mock_db):
-    # Mock settings and quiet mode
-    with (
-        patch("core.database.get_setting", return_value="on"),
-        patch("asyncio.sleep", side_effect=asyncio.CancelledError),
-    ):
-        # This will run once and then exit due to CancelledError side effect on sleep
-        try:
-            await scheduler_loop(MagicMock())
-        except asyncio.CancelledError:
-            pass
-
-    # Success is not crashing and respect settings
-
+@pytest.fixture
+def mock_job_store():
+    # APScheduler checks isinstance(store, BaseJobStore). 
+    # Return a real MemoryJobStore instead of a MagicMock to pass validation.
+    with patch('core.scheduler.SQLAlchemyJobStore', return_value=MemoryJobStore()) as mock_store:
+        yield mock_store
 
 @pytest.mark.asyncio
-async def test_scheduler_loop_checks_classes(mock_db):
-    # Mock settings and quiet mode off
-    mock_bot = MagicMock()
+async def test_enterprise_scheduler_initialization(mock_bot, mock_job_store):
+    scheduler = EnterpriseScheduler(mock_bot)
+    
+    # Verify jobs were added during init
+    jobs = scheduler.scheduler.get_jobs()
+    job_ids = [job.id for job in jobs]
+    
+    assert "morning_schedule" in job_ids
+    assert "weekly_summary" in job_ids
+    assert "audit_classes" in job_ids
+    assert "personal_reminders_processor" in job_ids
 
-    with (
-        patch("core.database.get_setting", return_value="off"),
-        patch("core.database.get_classes_starting_at", return_value=[]),
-        patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]),
-    ):
-        try:
-            await scheduler_loop(mock_bot)
-        except asyncio.CancelledError:
-            pass
-
-    # Verify it tried to check classes if not in quiet mode
-    # (Assuming scheduler_loop checks immediately or after first sleep)
+@pytest.mark.asyncio
+async def test_scheduler_audit_upcoming_classes(mock_bot, mock_job_store):
+    scheduler = EnterpriseScheduler(mock_bot)
+    
+    classes_today = [
+        {"id": 1, "time_start": "08:00", "subject": "Math", "group_type": "Lecture", "room": "101"}
+    ]
+    
+    with patch("core.database.get_schedule_for_day", AsyncMock(return_value=classes_today)), \
+         patch("core.scheduler._now") as mock_now, \
+         patch.object(scheduler.scheduler, "add_job") as mock_add_job:
+             
+        from datetime import datetime, timedelta
+        # Mock time so that 08:00 is exactly in 15 minutes (meaning audit happens at 07:45)
+        # We need notification time (07:45) to be within the next 6 minutes of "now".
+        # Let's say now is 07:44.
+        mock_now.return_value = datetime.strptime("2026-03-03 07:44:00", "%Y-%m-%d %H:%M:%S")
+        
+        await scheduler._audit_and_schedule_classes()
+        
+        # Verify add_job was called to schedule the EXACT 15 min reminder
+        mock_add_job.assert_called_once()
+        args, kwargs = mock_add_job.call_args
+        assert kwargs["id"] == "class_reminder_1_08:00_1"
+        assert kwargs["jobstore"] == "transient"
