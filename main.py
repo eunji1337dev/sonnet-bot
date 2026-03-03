@@ -203,7 +203,27 @@ async def async_main() -> None:
     await site.start()
     structlog.get_logger(__name__).info(f"Health server listening on port {port}")
 
-    # 2. Оборачиваем поллинг в задачу (Render-безопасно)
+    # 2. Self-ping to keep Render Web Service awake
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    keep_alive_task = None
+    if url:
+        async def _keep_alive() -> None:
+            import aiohttp
+            ping_url = f"{url}/health" if not url.endswith("/health") else url
+            while True:
+                await asyncio.sleep(600)  # 10 минут
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(ping_url, timeout=10) as response:
+                            structlog.get_logger(__name__).info("keep-alive ping", status=response.status)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    structlog.get_logger(__name__).error("keep-alive failed", error=str(e))
+        
+        keep_alive_task = asyncio.create_task(_keep_alive())
+
+    # 3. Оборачиваем поллинг в задачу (Render-безопасно)
     polling_task = asyncio.create_task(
         dp.start_polling(
             bot,
@@ -217,6 +237,8 @@ async def async_main() -> None:
     except asyncio.CancelledError:
         structlog.get_logger(__name__).info("Polling task was cancelled.")
     finally:
+        if keep_alive_task:
+            keep_alive_task.cancel()
         await runner.cleanup()
 
 
