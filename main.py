@@ -96,17 +96,18 @@ app = FastAPI(lifespan=lifespan)
 async def health_check():
     """Endpoint for UptimeRobot to ping to prevent Render free-tier sleep."""
     with tracer.start_as_current_span("health_check"):
-        return {"status": "ok", "version": "2026.1.0"}
+        return {"status": "healthy"}
 
 
 def main() -> None:
     # Run the bot application using Uvicorn
     # Render binds the active web process to port set in PORT environment variable
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8000))
     host = "0.0.0.0"
     
     log.info("Starting Uvicorn server", host=host, port=port)
-    uvicorn.run("main:app", host=host, port=port, loop="uvloop")
+    # Required for Render to correctly detect the port binding
+    uvicorn.run("main:app", host=host, port=port, loop="uvloop", log_level="info")
 
 
 if __name__ == "__main__":
