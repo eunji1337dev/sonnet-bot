@@ -429,6 +429,27 @@ async def cmd_announce(message: types.Message) -> None:
         await message.answer(f"Ошибка: {e}")
 
 
+@router.message(Command("send_group"))
+@require_role("admin")
+async def cmd_send_group(message: types.Message) -> None:
+    """Формат: /send_group [текст]"""
+    args = (message.text or "").split(None, 1)
+    if len(args) < 2:
+        await message.answer("Формат: /send_group [текст]")
+        return
+
+    if settings.group_chat_id == 0:
+        await message.answer("GROUP_CHAT_ID не настроен. Бот не знает, куда отправлять сообщение.")
+        return
+
+    text = args[1]
+    try:
+        await message.bot.send_message(settings.group_chat_id, text)  # type: ignore[union-attr]
+        await message.answer("✅ Сообщение успешно отправлено в группу.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
+
+
 @router.message(Command("poll"))
 @require_role("admin")
 async def cmd_poll(message: types.Message) -> None:
