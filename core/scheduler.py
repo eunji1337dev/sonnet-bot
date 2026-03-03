@@ -93,7 +93,7 @@ async def scheduler_loop(bot: Bot) -> None:
             log.info("scheduler cancelled")
             return
         except Exception as e:
-            log.error("scheduler error", error=str(e))
+            log.exception("critical scheduler loop error", error=str(e))
 
         await asyncio.sleep(30)
 
