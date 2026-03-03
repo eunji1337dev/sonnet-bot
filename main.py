@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sys
+import signal
 from contextlib import asynccontextmanager
 
 import structlog
@@ -84,9 +84,10 @@ async def lifespan(app: FastAPI):
         await polling_task
     except asyncio.CancelledError:
         pass
-    await bot.session.close()
-    await db.close_db()
-    log.info("Shutdown complete.")
+    finally:
+        await bot.session.close()
+        await db.close_db()
+        log.info("Shutdown complete.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -100,14 +101,26 @@ async def health_check():
 
 
 def main() -> None:
-    # Run the bot application using Uvicorn
-    # Render binds the active web process to port set in PORT environment variable
-    port = int(os.environ.get("PORT", 8000))
+    # Build a stable Server config explicitly
+    port = int(os.getenv("PORT", 8000))
     host = "0.0.0.0"
     
     log.info("Starting Uvicorn server", host=host, port=port)
-    # Required for Render to correctly detect the port binding
-    uvicorn.run("main:app", host=host, port=port, loop="uvloop", log_level="info")
+    
+    # Passing the app instance directly prevents double-import race conditions
+    config = uvicorn.Config(
+        app=app,
+        host=host,
+        port=port,
+        loop="uvloop",
+        log_level="info",
+        # Ensures Uvicorn propagates OS signals correctly to trigger lifespan teardown
+        timeout_graceful_shutdown=15 
+    )
+    server = uvicorn.Server(config)
+    
+    # Run the server synchronously
+    server.run()
 
 
 if __name__ == "__main__":
@@ -117,3 +130,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         log.info("Application interrupted by user.")
+    except Exception as e:
+        log.error("Fatal Application Error", error=str(e))
