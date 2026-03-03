@@ -227,13 +227,8 @@ async def _check_upcoming_classes(bot: Bot, now: datetime) -> None:
         day = now.weekday()
         classes = await db.get_schedule_for_day(day)
 
-        target_time = now + timedelta(minutes=15)
-        
-        # We need a 1-minute window to avoid race conditions.
-        # If the class starts between now+15m and now+16m, we trigger it.
-        # Or better yet, we just trigger it if delta is exactly 15 minutes.
-        window_start = target_time
-        window_end = target_time + timedelta(minutes=1)
+        current_minute = now.replace(second=0, microsecond=0)
+        target_minute = current_minute + timedelta(minutes=15)
 
         for cls in classes:
             start_time_str = cls["time_start"]
@@ -245,7 +240,7 @@ async def _check_upcoming_classes(bot: Bot, now: datetime) -> None:
             except ValueError:
                 continue
 
-            if window_start <= class_dt < window_end:
+            if class_dt == target_minute:
                 subj_name = cls["subject"]
                 class_type = cls["group_type"]
                 room = cls.get("room", "—")
